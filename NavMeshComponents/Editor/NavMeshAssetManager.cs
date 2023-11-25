@@ -137,6 +137,7 @@ namespace NavMeshPlus.Editors.Components
             {
                 var bakeData = InitializeBakeData(surface);
                 surface.UpdateNavMeshBlocking(bakeData);
+                PostSurfaceBake(surface, bakeData);
             }
         }
 
@@ -157,23 +158,27 @@ namespace NavMeshPlus.Editors.Components
 
                 if (oper.bakeOperation.isDone)
                 {
-                    var surface = oper.surface;
-                    var delete = GetNavMeshAssetToDelete(surface);
-                    if (delete != null)
-                        AssetDatabase.DeleteAsset(AssetDatabase.GetAssetPath(delete));
-
-                    surface.RemoveData();
-                    SetNavMeshData(surface, oper.bakeData);
-
-                    if (surface.isActiveAndEnabled)
-                        surface.AddData();
-                    CreateNavMeshAsset(surface);
-                    EditorSceneManager.MarkSceneDirty(surface.gameObject.scene);
+                    PostSurfaceBake(oper.surface, oper.bakeData);
                 }
             }
             m_BakeOperations.RemoveAll(o => o.bakeOperation == null || o.bakeOperation.isDone);
             if (m_BakeOperations.Count == 0)
                 EditorApplication.update -= UpdateAsyncBuildOperations;
+        }
+
+        private void PostSurfaceBake(NavMeshSurface surface, NavMeshData bakeData)
+        {
+            var delete = GetNavMeshAssetToDelete(surface);
+            if (delete != null)
+                AssetDatabase.DeleteAsset(AssetDatabase.GetAssetPath(delete));
+
+            surface.RemoveData();
+            SetNavMeshData(surface, bakeData);
+
+            if (surface.isActiveAndEnabled)
+                surface.AddData();
+            CreateNavMeshAsset(surface);
+            EditorSceneManager.MarkSceneDirty(surface.gameObject.scene);
         }
 
         public bool IsSurfaceBaking(NavMeshSurface surface)
