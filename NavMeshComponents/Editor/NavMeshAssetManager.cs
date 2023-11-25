@@ -131,6 +131,15 @@ namespace NavMeshPlus.Editors.Components
             }
         }
 
+        public void BakeSurfacesBlocking(IEnumerable<NavMeshSurface> surfaces)
+        {
+            foreach (var surface in surfaces)
+            {
+                var bakeData = InitializeBakeData(surface);
+                surface.UpdateNavMeshBlocking(bakeData);
+            }
+        }
+
         static NavMeshData InitializeBakeData(NavMeshSurface surface)
         {
             var emptySources = new List<NavMeshBuildSource>();

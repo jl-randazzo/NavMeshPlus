@@ -214,25 +214,38 @@ namespace NavMeshPlus.Components
             return UpdateNavMesh(m_NavMeshData);
         }
 
-        public AsyncOperation UpdateNavMesh(NavMeshData data)
+        private NavMeshBuilderState CreateBuilderState(out List<NavMeshBuildSource> sources)
         {
-            using var builderState = new NavMeshBuilderState() { };
-
-            var sources = CollectSources(builderState);
-
-            // Use unscaled bounds - this differs in behaviour from e.g. collider components.
-            // But is similar to reflection probe - and since navmesh data has no scaling support - it is the right choice here.
+            var builderState = new NavMeshBuilderState() { };
+            sources = CollectSources(builderState);
             var sourcesBounds = new Bounds(m_Center, Abs(m_Size));
             if (m_CollectObjects == CollectObjects.All || m_CollectObjects == CollectObjects.Children)
             {
                 sourcesBounds = CalculateWorldBounds(sources);
             }
             builderState.worldBounds = sourcesBounds;
+
+            // Use unscaled bounds - this differs in behaviour from e.g. collider components.
+            // But is similar to reflection probe - and since navmesh data has no scaling support - it is the right choice here.
             for (int i = 0; i < NevMeshExtensions.Count; ++i)
             {
                 NevMeshExtensions[i].PostCollectSources(this, sources, builderState);
             }
-            return NavMeshBuilder.UpdateNavMeshDataAsync(data, GetBuildSettings(), sources, sourcesBounds);
+
+            return builderState;
+        }
+
+        public AsyncOperation UpdateNavMesh(NavMeshData data)
+        {
+            using var builderState = CreateBuilderState(out List<NavMeshBuildSource> sources);
+            return NavMeshBuilder.UpdateNavMeshDataAsync(data, GetBuildSettings(), sources, builderState.worldBounds);
+        }
+
+        // Variant of 'UpdateNavMesh' that blocks further execution until the NavMesh is baked.
+        public bool UpdateNavMeshBlocking(NavMeshData data)
+        {
+            using var builderState = CreateBuilderState(out List<NavMeshBuildSource> sources);
+            return NavMeshBuilder.UpdateNavMeshData(data, GetBuildSettings(), sources, builderState.worldBounds);
         }
 
         static void Register(NavMeshSurface surface)
