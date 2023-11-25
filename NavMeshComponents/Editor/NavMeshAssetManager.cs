@@ -178,7 +178,7 @@ namespace NavMeshPlus.Editors.Components
                     continue;
 
                 if (oper.surface == surface)
-                    return true;
+                    return !oper.bakeOperation.isDone;
             }
 
             return false;
