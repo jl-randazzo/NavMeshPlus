@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.IO;
 using UnityEditor.Experimental.SceneManagement;
 using UnityEditor.SceneManagement;
+using UnityEditor.VersionControl;
 using UnityEngine.AI;
 using UnityEngine;
 using NavMeshPlus.Extensions;
@@ -62,15 +63,114 @@ namespace NavMeshPlus.Editors.Components
             }
             if (!Directory.Exists(targetPath))
                 Directory.CreateDirectory(targetPath);
-            return targetPath;
+            return targetPath.Replace('\\', '/');
+        }
+
+        static string GetCanonicalNavMeshAssetPath(NavMeshSurface surface)
+        {
+            var targetPath = GetAndEnsureTargetPath(surface);
+            return Path.Combine(targetPath, "NavMesh-" + surface.name + ".asset").Replace('\\', '/');
+        }
+
+        static void CheckoutAssetPath(string assetPath)
+        {
+            if (string.IsNullOrEmpty(assetPath) || !assetPath.StartsWith("Assets"))
+                return;
+
+            if (Provider.enabled && Provider.isActive)
+            {
+                Provider.Checkout(assetPath, CheckoutMode.Both).Wait();
+                return;
+            }
+
+            // Fallback when VCS is unavailable: clear read-only so write/delete can succeed.
+            var fileSystemPath = Path.GetFullPath(assetPath);
+            if (File.Exists(fileSystemPath))
+            {
+                var attributes = File.GetAttributes(fileSystemPath);
+                if ((attributes & FileAttributes.ReadOnly) != 0)
+                    File.SetAttributes(fileSystemPath, attributes & ~FileAttributes.ReadOnly);
+            }
+        }
+
+        /// <summary>
+        /// Only talks to VCS when the file is still read-only (not already checked out / writable).
+        /// </summary>
+        static void EnsureAssetWritable(string assetPath)
+        {
+            if (string.IsNullOrEmpty(assetPath) || !assetPath.StartsWith("Assets"))
+                return;
+
+            var fileSystemPath = Path.GetFullPath(assetPath);
+            if (File.Exists(fileSystemPath) && (File.GetAttributes(fileSystemPath) & FileAttributes.ReadOnly) == 0)
+                return;
+
+            CheckoutAssetPath(assetPath);
+        }
+
+        static void DeleteAssetWithCheckout(string assetPath)
+        {
+            if (string.IsNullOrEmpty(assetPath))
+                return;
+
+            if (string.IsNullOrEmpty(AssetDatabase.AssetPathToGUID(assetPath)))
+                return;
+
+            EnsureAssetWritable(assetPath);
+            AssetDatabase.DeleteAsset(assetPath);
+        }
+
+        static bool IsPersistentAsset(Object assetObject)
+        {
+            return assetObject && !string.IsNullOrEmpty(AssetDatabase.GetAssetPath(assetObject));
+        }
+
+        /// <summary>
+        /// Prefer the surface's owned persistent asset, else an existing canonical asset, else a new in-memory NavMeshData.
+        /// </summary>
+        NavMeshData ResolveBakeTarget(NavMeshSurface surface)
+        {
+            var owned = GetNavMeshAssetToDelete(surface);
+            if (owned != null && IsPersistentAsset(owned))
+                return owned;
+
+            var canonicalPath = GetCanonicalNavMeshAssetPath(surface);
+            var canonicalAsset = AssetDatabase.LoadAssetAtPath<NavMeshData>(canonicalPath);
+            if (canonicalAsset != null)
+                return canonicalAsset;
+
+            return InitializeBakeData(surface);
+        }
+
+        /// <summary>
+        /// One-time rename to the canonical filename when free. Keeps the same GUID (P4 edit/move, not delete+add).
+        /// </summary>
+        static void EnsureCanonicalAssetPath(NavMeshData navMeshData, NavMeshSurface surface)
+        {
+            var currentPath = AssetDatabase.GetAssetPath(navMeshData);
+            if (string.IsNullOrEmpty(currentPath))
+                return;
+
+            var canonicalPath = GetCanonicalNavMeshAssetPath(surface);
+            if (currentPath.Replace('\\', '/') == canonicalPath)
+                return;
+
+            if (!string.IsNullOrEmpty(AssetDatabase.AssetPathToGUID(canonicalPath)))
+                return;
+
+            EnsureAssetWritable(currentPath);
+            AssetDatabase.MoveAsset(currentPath, canonicalPath);
         }
 
         static void CreateNavMeshAsset(NavMeshSurface surface)
         {
-            var targetPath = GetAndEnsureTargetPath(surface);
+            var combinedAssetPath = GetCanonicalNavMeshAssetPath(surface);
+            if (!string.IsNullOrEmpty(AssetDatabase.AssetPathToGUID(combinedAssetPath)))
+            {
+                // Canonical path already occupied — should have been resolved as bake target.
+                return;
+            }
 
-            var combinedAssetPath = Path.Combine(targetPath, "NavMesh-" + surface.name + ".asset");
-            combinedAssetPath = AssetDatabase.GenerateUniqueAssetPath(combinedAssetPath);
             AssetDatabase.CreateAsset(surface.navMeshData, combinedAssetPath);
         }
 
@@ -78,7 +178,7 @@ namespace NavMeshPlus.Editors.Components
         {
             if (PrefabUtility.IsPartOfPrefabInstance(navSurface) && !PrefabUtility.IsPartOfModelPrefab(navSurface))
             {
-                // Don't allow deleting the asset belonging to the prefab parent
+                // Don't allow deleting/mutating the asset belonging to the prefab parent
                 var parentSurface = PrefabUtility.GetCorrespondingObjectFromSource(navSurface) as NavMeshSurface;
                 if (parentSurface && navSurface.navMeshData == parentSurface.navMeshData)
                     return null;
@@ -107,8 +207,8 @@ namespace NavMeshPlus.Editors.Components
                 EditorSceneManager.MarkSceneDirty(navSurface.gameObject.scene);
             }
 
-            if (assetToDelete)
-                AssetDatabase.DeleteAsset(AssetDatabase.GetAssetPath(assetToDelete));
+            if (assetToDelete && IsPersistentAsset(assetToDelete))
+                DeleteAssetWithCheckout(AssetDatabase.GetAssetPath(assetToDelete));
         }
 
         public void StartBakingSurfaces(UnityEngine.Object[] surfaces)
@@ -122,8 +222,11 @@ namespace NavMeshPlus.Editors.Components
                 StoreNavMeshDataIfInPrefab(surf);
 
                 var oper = new AsyncBakeOperation();
+                oper.bakeData = ResolveBakeTarget(surf);
+                var assetPath = AssetDatabase.GetAssetPath(oper.bakeData);
+                if (!string.IsNullOrEmpty(assetPath))
+                    EnsureAssetWritable(assetPath);
 
-                oper.bakeData = InitializeBakeData(surf);
                 oper.bakeOperation = surf.UpdateNavMesh(oper.bakeData);
                 oper.surface = surf;
 
@@ -135,10 +238,18 @@ namespace NavMeshPlus.Editors.Components
         {
             foreach (var surface in surfaces)
             {
-                var bakeData = InitializeBakeData(surface);
+                StoreNavMeshDataIfInPrefab(surface);
+
+                var bakeData = ResolveBakeTarget(surface);
+                var assetPath = AssetDatabase.GetAssetPath(bakeData);
+                if (!string.IsNullOrEmpty(assetPath))
+                    EnsureAssetWritable(assetPath);
+
                 surface.UpdateNavMeshBlocking(bakeData);
-                PostSurfaceBake(surface, bakeData);
+                PersistBakedNavMesh(surface, bakeData);
             }
+
+            AssetDatabase.SaveAssets();
         }
 
         static NavMeshData InitializeBakeData(NavMeshSurface surface)
@@ -158,26 +269,33 @@ namespace NavMeshPlus.Editors.Components
 
                 if (oper.bakeOperation.isDone)
                 {
-                    PostSurfaceBake(oper.surface, oper.bakeData);
+                    PersistBakedNavMesh(oper.surface, oper.bakeData);
                 }
             }
             m_BakeOperations.RemoveAll(o => o.bakeOperation == null || o.bakeOperation.isDone);
             if (m_BakeOperations.Count == 0)
+            {
                 EditorApplication.update -= UpdateAsyncBuildOperations;
+                AssetDatabase.SaveAssets();
+            }
         }
 
-        private void PostSurfaceBake(NavMeshSurface surface, NavMeshData bakeData)
+        private void PersistBakedNavMesh(NavMeshSurface surface, NavMeshData bakeData)
         {
-            var delete = GetNavMeshAssetToDelete(surface);
-            if (delete != null)
-                AssetDatabase.DeleteAsset(AssetDatabase.GetAssetPath(delete));
+            var wasPersistent = IsPersistentAsset(bakeData);
 
             surface.RemoveData();
             SetNavMeshData(surface, bakeData);
 
             if (surface.isActiveAndEnabled)
                 surface.AddData();
-            CreateNavMeshAsset(surface);
+
+            if (!wasPersistent)
+                CreateNavMeshAsset(surface);
+            else
+                EnsureCanonicalAssetPath(bakeData, surface);
+
+            EditorUtility.SetDirty(bakeData);
             EditorSceneManager.MarkSceneDirty(surface.gameObject.scene);
         }
 
@@ -276,7 +394,7 @@ namespace NavMeshPlus.Editors.Components
                     if (storedNavMeshData != null && storedNavMeshData != surface.navMeshData)
                     {
                         var assetPath = AssetDatabase.GetAssetPath(storedNavMeshData);
-                        AssetDatabase.DeleteAsset(assetPath);
+                        DeleteAssetWithCheckout(assetPath);
                     }
 
                     m_PrefabNavMeshDataAssets.RemoveAt(i);
@@ -317,7 +435,7 @@ namespace NavMeshPlus.Editors.Components
                         if (storedPrefabInfo.navMeshData != null)
                         {
                             var assetPath = AssetDatabase.GetAssetPath(storedPrefabInfo.navMeshData);
-                            AssetDatabase.DeleteAsset(assetPath);
+                            DeleteAssetWithCheckout(assetPath);
                         }
 
                         m_PrefabNavMeshDataAssets.RemoveAt(i);
@@ -330,7 +448,7 @@ namespace NavMeshPlus.Editors.Components
                         if (baseSurface == null || surfaceInPrefab.navMeshData != baseSurface.navMeshData)
                         {
                             var assetPath = AssetDatabase.GetAssetPath(surfaceInPrefab.navMeshData);
-                            AssetDatabase.DeleteAsset(assetPath);
+                            DeleteAssetWithCheckout(assetPath);
 
                             //Debug.LogFormat("The surface {0} from the prefab has baked new NavMeshData but did not save this change so the asset has been now deleted. ({1})",
                             //    surfaceInPrefab, assetPath);
